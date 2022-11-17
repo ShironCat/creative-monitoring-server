@@ -66,7 +66,16 @@ async fn main() {
 
     let routes = index.or(sensor).or(client);
 
-    warp::serve(routes).run(([0, 0, 0, 0], 8080)).await;
+    warp::serve(routes)
+        .run((
+            [0, 0, 0, 0],
+            std::env::args()
+                .nth(1)
+                .unwrap_or("8080".to_string())
+                .parse::<u16>()
+                .unwrap_or(8080),
+        ))
+        .await;
 }
 
 async fn sensor_connected(ws: WebSocket, sensors: Devices, clients: Devices) {
