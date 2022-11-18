@@ -138,7 +138,7 @@ async fn check_observer(observer: Arc<RwLock<Once>>, clients: &Devices, sensors:
     observer.clone().read().await.call_once(|| {
         let clients_clone = clients.clone();
 
-        let mut interval = interval(Duration::from_millis(500));
+        let mut interval = interval(Duration::from_secs(2));
 
         tokio::task::spawn(async move {
             while !clients_clone.read().await.is_empty() {
