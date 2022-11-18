@@ -24,22 +24,29 @@ use warp::{
 
 static ID: AtomicUsize = AtomicUsize::new(1);
 
-type Devices = Arc<RwLock<HashMap<usize, UnboundedSender<Message>>>>;
+type Sensors = Arc<RwLock<HashMap<usize, (String, UnboundedSender<Message>)>>>;
+
+type Clients = Arc<RwLock<HashMap<usize, UnboundedSender<Message>>>>;
 
 type Observer = Arc<RwLock<Once>>;
 
 #[derive(Deserialize)]
+struct SensorMessage {
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct ClientMessage {
-    target: usize,
+    target: String,
     content: String,
 }
 
 #[tokio::main]
 async fn main() {
-    let sensors = Devices::default();
+    let sensors = Sensors::default();
     let sensors = any().map(move || sensors.clone());
 
-    let clients = Devices::default();
+    let clients = Clients::default();
     let clients = any().map(move || clients.clone());
 
     let observer = Observer::default();
@@ -78,7 +85,7 @@ async fn main() {
         .await;
 }
 
-async fn sensor_connected(ws: WebSocket, sensors: Devices, clients: Devices) {
+async fn sensor_connected(ws: WebSocket, sensors: Sensors, clients: Clients) {
     let id = ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (mut sensor_ws_tx, mut sensor_ws_rx) = ws.split();
     let (tx, rx) = mpsc::unbounded_channel();
@@ -90,7 +97,7 @@ async fn sensor_connected(ws: WebSocket, sensors: Devices, clients: Devices) {
         }
     });
 
-    sensors.write().await.insert(id, tx);
+    sensors.write().await.insert(id, (String::new(), tx));
 
     while let Some(result) = sensor_ws_rx.next().await {
         let msg = match result {
@@ -99,13 +106,13 @@ async fn sensor_connected(ws: WebSocket, sensors: Devices, clients: Devices) {
                 break;
             }
         };
-        sensor_message(msg, &clients).await;
+        sensor_message(id, msg, &clients, &sensors).await;
     }
 
     sensor_disconnected(id, &sensors).await;
 }
 
-async fn client_connected(ws: WebSocket, clients: Devices, sensors: Devices, observer: Observer) {
+async fn client_connected(ws: WebSocket, clients: Clients, sensors: Sensors, observer: Observer) {
     let id = ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (mut client_ws_tx, mut client_ws_rx) = ws.split();
     let (tx, rx) = mpsc::unbounded_channel();
@@ -134,7 +141,7 @@ async fn client_connected(ws: WebSocket, clients: Devices, sensors: Devices, obs
     client_disconnected(id, &clients).await;
 }
 
-async fn check_observer(observer: Arc<RwLock<Once>>, clients: &Devices, sensors: Devices) {
+async fn check_observer(observer: Arc<RwLock<Once>>, clients: &Clients, sensors: Sensors) {
     observer.clone().read().await.call_once(|| {
         let clients_clone = clients.clone();
 
@@ -146,7 +153,7 @@ async fn check_observer(observer: Arc<RwLock<Once>>, clients: &Devices, sensors:
                     .read()
                     .await
                     .iter()
-                    .for_each(|(_, tx)| tx.send(Message::text("poll")).unwrap_or(()));
+                    .for_each(|(_, (_, tx))| tx.send(Message::text("poll")).unwrap_or(()));
                 interval.tick().await;
             }
 
@@ -155,9 +162,15 @@ async fn check_observer(observer: Arc<RwLock<Once>>, clients: &Devices, sensors:
     });
 }
 
-async fn sensor_message(msg: Message, clients: &Devices) {
+async fn sensor_message(id: usize, msg: Message, clients: &Clients, sensors: &Sensors) {
     let msg = if let Ok(s) = msg.to_str() {
         s
+    } else {
+        return;
+    };
+
+    let sensor_message: SensorMessage = if let Ok(sm) = serde_json::from_str(msg) {
+        sm
     } else {
         return;
     };
@@ -167,9 +180,15 @@ async fn sensor_message(msg: Message, clients: &Devices) {
         .await
         .iter()
         .for_each(|(_, tx)| tx.send(Message::text(msg)).unwrap_or(()));
+
+    sensors
+        .write()
+        .await
+        .entry(id)
+        .and_modify(|(name, _)| *name = sensor_message.name);
 }
 
-async fn client_message(msg: Message, sensors: &Devices) {
+async fn client_message(msg: Message, sensors: &Sensors) {
     let msg = if let Ok(s) = msg.to_str() {
         s
     } else {
@@ -182,20 +201,20 @@ async fn client_message(msg: Message, sensors: &Devices) {
         return;
     };
 
-    if let Some((_, tx)) = sensors
+    if let Some((_, (_, tx))) = sensors
         .read()
         .await
         .iter()
-        .find(|(id, _)| **id == client_message.target)
+        .find(|(_, (name, _))| **name == client_message.target)
     {
         tx.send(Message::text(client_message.content)).unwrap_or(())
     };
 }
 
-async fn sensor_disconnected(id: usize, sensors: &Devices) {
+async fn sensor_disconnected(id: usize, sensors: &Sensors) {
     sensors.write().await.remove(&id);
 }
 
-async fn client_disconnected(id: usize, clients: &Devices) {
+async fn client_disconnected(id: usize, clients: &Clients) {
     clients.write().await.remove(&id);
 }
